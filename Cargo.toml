@@ -1,0 +1,63 @@
+[package]
+name = "lora-urbit"
+version = "0.1.0"
+edition = "2021"
+description = "Sovereign LoRaWAN infrastructure powered by Urbit's Ames protocol"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Byte manipulation (for packet parsing)
+bytes = "1"
+
+# Base64 decoding (for rxpk payload)
+base64 = "0.22"
+
+# Error handling
+anyhow = "1"
+
+# HTTP client (for Urbit Airlock, Phase 2)
+reqwest = { version = "0.12", features = ["json"], optional = true }
+
+# Crypto (for LoRaWAN MIC verification)
+aes = { version = "0.8", optional = true }
+cmac = { version = "0.7", optional = true }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Hex encoding/decoding
+hex = "0.4"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+[features]
+default = ["phase1"]
+phase1 = []                                    # UDP server + LoRaWAN decoder
+phase2 = ["phase1", "dep:reqwest"]             # + Urbit Airlock bridge
+phase3 = ["phase2"]                            # + Gall agent support
+phase4 = ["phase3", "dep:aes", "dep:cmac"]     # + Helium integration
+full = ["phase4"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[bin]]
+name = "lora-urbit"
+path = "src/main.rs"
+
+[[bin]]
+name = "gateway-sim"
+path = "src/bin/gateway_sim.rs"

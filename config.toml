@@ -1,0 +1,26 @@
+# LoraUrbit Configuration
+
+[udp]
+# Port to listen for Semtech UDP Packet Forwarder traffic
+bind = "0.0.0.0:1680"
+
+[lorawan]
+# Whether to attempt payload decryption (requires AppSKey)
+decrypt_payload = false
+
+[urbit]
+# Urbit ship Airlock connection (Phase 2+)
+# url = "http://127.0.0.1:80"
+# ship = "~your-ship-name"
+# code = "+code output"
+# agent = "lora-agent"
+
+[helium]
+# Helium network integration (Phase 4+)
+# oui = 0
+# net_id = "00003C"
+# config_host = "https://config.iot.mainnet.helium.io:6080"
+# delegate_keypair = "./keys/delegate.bin"
+
+[logging]
+level = "info"
