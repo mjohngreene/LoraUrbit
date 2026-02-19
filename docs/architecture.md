@@ -1,68 +1,136 @@
 # LoraUrbit Architecture
 
+## Design Principle
+
+**Hoon owns the brains. Rust owns the wire.**
+
+All application logic — device state, subscriptions, access control, data routing,
+multi-ship peering — lives in Hoon as a Gall agent on your Urbit ship.
+
+Rust handles only what Urbit can't do natively: raw UDP sockets, binary LoRaWAN
+protocol parsing, and Helium's gRPC interface. The Rust bridge is intentionally
+thin — it decodes packets and hands structured JSON to the ship via Airlock.
+
 ## Overview
 
 LoraUrbit bridges two networks:
 1. **LoRaWAN** — low-power, wide-area radio for IoT sensors
 2. **Urbit (Ames)** — cryptographic, identity-native, E2E encrypted networking
 
-The bridge replaces the traditional HTTP/MQTT application transport layer in LoRaWAN with Urbit's Ames protocol, creating sovereign IoT infrastructure.
+The bridge replaces the traditional HTTP/MQTT application transport layer in
+LoRaWAN with Urbit's Ames protocol, creating sovereign IoT infrastructure.
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        URBIT SHIP                           │
+│                                                             │
+│  %lora-agent (Gall)              THE BRAINS (Hoon)         │
+│  ├── State                                                  │
+│  │   ├── device registry    (map @t device)                 │
+│  │   ├── packet history     (list uplink)                   │
+│  │   └── downlink queue     (list downlink)                 │
+│  ├── Poke handlers                                          │
+│  │   ├── %lora-action       uplink, register, downlink-req  │
+│  │   └── %lora-ack          downlink TX confirmation        │
+│  ├── Subscription paths                                     │
+│  │   ├── /devices           device registry updates         │
+│  │   ├── /uplinks           all uplink packets              │
+│  │   └── /uplinks/<addr>    per-device uplink stream        │
+│  ├── Scry endpoints                                         │
+│  │   ├── /devices           list all known devices          │
+│  │   ├── /device/<addr>     single device state             │
+│  │   └── /downlink-queue    pending downlinks (for bridge)  │
+│  └── Ames peering                                           │
+│      └── Remote ships subscribe to paths natively           │
+│                                                             │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ Airlock (HTTP poke/scry, localhost)
+                       │
+┌──────────────────────┴──────────────────────────────────────┐
+│  lora-bridge (Rust)          THE WIRE (thin)                │
+│  ├── UDP server         Semtech GWMP (port 1680)            │
+│  ├── LoRaWAN decoder    Binary → structured data            │
+│  ├── Airlock client     login + poke + scry (~150 LOC)      │
+│  └── Helium gRPC        OUI/route management (Phase 4)      │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ Semtech UDP / GWMP
+                       │
+         ┌─────────────┴──────────────┐
+         │                            │
+┌────────┴────────┐    ┌──────────────┴──────────────┐
+│  Local LoRa     │    │  Helium Network             │
+│  Gateway        │    │  (300k+ hotspots via OUI)   │
+└────────┬────────┘    └──────────────┬──────────────┘
+         │ RF (902-928MHz)            │ RF
+┌────────┴────────┐    ┌──────────────┴──────────────┐
+│  LoRa End       │    │  LoRa End                   │
+│  Devices        │    │  Devices (anywhere)          │
+└─────────────────┘    └─────────────────────────────┘
+```
 
 ## Data Flow
 
-### Local Gateway Path
+### Uplink (sensor → ship)
 ```
-Sensor → (RF 902-928MHz) → LoRa Gateway → (Semtech UDP :1680) → LoraUrbit → (Airlock HTTP) → Urbit Ship → (Ames) → Subscribers
+1. LoRa device transmits RF packet
+2. Gateway (or Helium hotspot) receives, wraps in Semtech UDP
+3. Rust bridge receives UDP, decodes LoRaWAN binary payload
+4. Rust bridge pokes %lora-agent via Airlock with JSON
+5. %lora-agent stores packet, updates device state
+6. %lora-agent notifies all subscribers (local + remote ships via Ames)
 ```
 
-### Helium Network Path
+### Downlink (ship → device)
 ```
-Sensor → (RF) → Helium Hotspot → Helium Packet Router → (GWMP UDP) → LoraUrbit → (Airlock HTTP) → Urbit Ship → (Ames) → Subscribers
+1. User (or remote ship) pokes %lora-agent with downlink request
+2. %lora-agent queues downlink in state
+3. Rust bridge polls /downlink-queue via scry
+4. Rust bridge sends PULL_RESP to gateway via UDP
+5. Gateway transmits RF to device in next RX window
+6. Gateway sends TX_ACK to bridge
+7. Bridge pokes %lora-agent with confirmation
 ```
 
-Key insight: **Both paths converge at the same UDP server.** The Helium Packet Router speaks the same Semtech GWMP protocol as a local gateway, so our UDP server handles both transparently.
+### Remote subscription (ship-to-ship)
+```
+1. Remote ship's agent pokes our %lora-agent: [%subscribe /uplinks]
+2. %lora-agent adds watcher on path
+3. When new uplink arrives, %lora-agent gives update to all watchers
+4. Updates flow over Ames — E2E encrypted, identity-authenticated
+5. No HTTP, no cloud, no API keys — just Ames
+```
 
-## Components
+## What Lives Where (and Why)
 
-### 1. UDP Server (`src/udp/`)
-- Listens on UDP port 1680 (configurable)
-- Speaks Semtech Gateway Messaging Protocol (GWMP)
-- Handles: PUSH_DATA (uplinks), PULL_DATA (keepalive), TX_ACK (downlink status)
-- Responds: PUSH_ACK, PULL_ACK
-- Passes decoded rxpk payloads to LoRaWAN decoder
+### Must be Rust (Urbit can't do this)
 
-### 2. LoRaWAN Decoder (`src/lorawan/`)
-- Parses PHY payload from base64
-- Decodes MAC header (MHDR): message type, major version
-- Decodes frame: DevAddr, FCtrl, FCnt, FOpts, FPort, FRMPayload, MIC
-- Handles: JoinRequest, JoinAccept, Data Up/Down, Proprietary
-- Phase 4: MIC verification using NwkSKey, payload decryption using AppSKey
+| Component | Reason |
+|-----------|--------|
+| UDP server (Semtech GWMP) | Urbit has no raw UDP socket support; Eyre is HTTP only |
+| LoRaWAN binary decoder | Low-level byte parsing; Hoon can but shouldn't |
+| AES-128 MIC/decrypt | Crypto primitives for LoRaWAN security (Phase 4) |
+| Helium gRPC client | Protobuf/gRPC is Rust-native in Helium ecosystem |
+| Gateway simulator | Testing tool, stays in Rust |
 
-### 3. Urbit Bridge (`src/urbit/`)
-- Connects to local Urbit ship via Airlock (Eyre HTTP API)
-- Authenticates using +code
-- Pokes %lora-agent with decoded packets as JSON
-- Subscribes to paths for downlink commands and device management
+### Must be Hoon (Urbit does this better)
 
-### 4. Helium Integration (`src/helium/`)
-- OUI registration and route management via Config Service (gRPC)
-- DevAddr slab management
-- Data Credit monitoring
-- Phase 4 MVP: GWMP mode (reuses UDP server)
-- Phase 5: Native Packet Router gRPC streaming
-
-### 5. Gall Agent (`urbit/lora-agent/`)
-- Hoon application running inside Urbit
-- Receives pokes from the bridge with uplink data
-- Maintains device state in Urbit's persistent store
-- Publishes on subscription paths (e.g., `/lora/devices`, `/lora/uplinks`)
-- Remote ships subscribe over Ames — data flows encrypted, ship-to-ship
+| Component | Reason |
+|-----------|--------|
+| Device registry | Persistent state — Urbit's event log, no external DB |
+| Packet storage | Same — persists automatically, survives restarts |
+| Subscription routing | Ames subscriptions are native; building this in Rust duplicates Urbit |
+| Access control | Ship identity is the auth — no API keys needed |
+| Downlink queue | Agent state, poke-driven, survives restarts |
+| Multi-ship peering | Ames is the whole point — sovereign, encrypted, decentralized |
+| Web UI | Sail/Landscape, served from the ship itself |
 
 ## Protocol Stack Comparison
 
 ### Traditional LoRaWAN
 ```
-Application ←── HTTP/MQTT ──→ Application Server
+Application ←── HTTP/MQTT ──→ Application Server (AWS/GCP)
     ↑                              ↑
 Network Server ←── TCP/TLS ──→ Cloud Infrastructure
     ↑
@@ -73,13 +141,13 @@ End Device ←── LoRa RF ──→ (sub-GHz ISM band)
 
 ### LoraUrbit
 ```
-Subscriber Ship ←── Ames (E2E encrypted) ──→ Your Ship (%lora-agent)
-                                                  ↑
-                                            Airlock HTTP (localhost)
-                                                  ↑
-                                            LoraUrbit Bridge (Rust)
-                                                  ↑
-Gateway / Helium ←── Semtech UDP ──→ (local network)
+Remote Ships ←── Ames (E2E encrypted) ──→ Your Ship (%lora-agent)
+                                                ↑
+                                          Airlock (localhost HTTP)
+                                                ↑
+                                          lora-bridge (Rust, thin)
+                                                ↑
+Gateway / Helium ←── Semtech UDP ──→ (local network / internet)
     ↑
 End Device ←── LoRa RF ──→ (sub-GHz ISM band)
 ```
@@ -95,25 +163,3 @@ End Device ←── LoRa RF ──→ (sub-GHz ISM band)
 | Routing | Centralized DNS | Decentralized galaxy routing |
 | Censorship | Domain can be seized | Ship ID is sovereign |
 | Cost | Server hosting + cloud fees | One-time Urbit ID purchase |
-
-## Helium Integration Details
-
-### OUI Setup ($235 one-time)
-1. Create Helium wallet (Solana format)
-2. Generate owner + delegate keypairs via `helium-config-service-cli`
-3. Email Helium Foundation to purchase OUI + DevAddr slab
-4. Fund escrow with minimum 3.5M Data Credits ($35)
-
-### Route Configuration
-- Register LoraUrbit's public IP as the LNS endpoint
-- Configure GWMP port mapping (e.g., US915 → 1701)
-- Add DevAddr ranges for routing uplinks
-- Add Device EUI pairs for routing join requests
-
-### Packet Flow
-1. Device sends uplink
-2. Nearest Helium hotspot picks it up
-3. Helium Packet Router matches DevAddr to our OUI route
-4. Packet Router forwards to our IP via GWMP (Semtech UDP)
-5. Our UDP server receives it — identical to a local gateway packet
-6. Decoded and bridged to Urbit as usual

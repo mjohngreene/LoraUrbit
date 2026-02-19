@@ -64,69 +64,79 @@ Additionally, LoraUrbit integrates with the **Helium IoT Network** — a decentr
 
 ```
 LoraUrbit/
-├── Cargo.toml              # Rust workspace
-├── README.md
-├── config.toml             # Runtime configuration
-├── docs/
-│   ├── architecture.md     # Detailed architecture & design decisions
-│   ├── helium-integration.md  # Helium OUI/LNS integration guide
-│   └── semtech-udp.md      # Semtech UDP Packet Forwarder protocol reference
-├── src/
-│   ├── main.rs             # Entry point, async runtime
-│   ├── config.rs           # Configuration loading
-│   ├── udp/
-│   │   ├── mod.rs          # Semtech UDP Packet Forwarder server
-│   │   └── protocol.rs     # GWMP frame parsing (PUSH_DATA, PULL_DATA, etc.)
-│   ├── lorawan/
-│   │   ├── mod.rs          # LoRaWAN MAC layer decoder
-│   │   └── keys.rs         # Session key management, MIC verification
-│   ├── helium/
-│   │   ├── mod.rs          # Helium network integration
-│   │   └── router.rs       # Helium Packet Router client
-│   └── urbit/
-│       ├── mod.rs          # Urbit Airlock client
-│       └── types.rs        # Poke/subscription types for %lora-agent
-├── urbit/                  # Hoon code for Urbit
-│   └── lora-agent/
+├── Cargo.toml                    # Rust: bridge binary
+├── config.toml                   # Rust: bridge runtime config
+├── src/                          # Rust: thin translation layer
+│   ├── main.rs                   # Entry point, async runtime
+│   ├── config.rs                 # Configuration loading
+│   ├── udp/                      # Semtech GWMP server
+│   │   ├── mod.rs
+│   │   └── protocol.rs
+│   ├── lorawan/                  # LoRaWAN decoder + crypto
+│   │   ├── mod.rs
+│   │   └── keys.rs
+│   ├── helium/                   # Helium gRPC (Phase 4)
+│   │   ├── mod.rs
+│   │   └── router.rs
+│   └── urbit/                    # Airlock client
+│       ├── airlock.rs            # Lightweight HTTP client
+│       └── types.rs              # Shared types (Rust ↔ JSON ↔ Hoon)
+├── urbit/                        # Hoon: the brains (desk: %lora)
+│   └── lora/
 │       ├── app/
-│       │   └── lora-agent.hoon
+│       │   └── lora-agent.hoon   # Gall agent
 │       ├── sur/
-│       │   └── lora-agent.hoon
-│       └── mar/
-│           └── lora/
-│               └── action.hoon
+│       │   └── lora-agent.hoon   # Type definitions
+│       ├── mar/
+│       │   └── lora/
+│       │       ├── action.hoon   # Poke mark (JSON → noun)
+│       │       └── update.hoon   # Subscription mark (noun → JSON)
+│       ├── lib/
+│       │   └── lora.hoon         # Helper library
+│       └── desk.bill             # Agent manifest
+├── docs/
+│   ├── architecture.md
+│   ├── helium-integration.md
+│   └── semtech-udp.md
 └── tests/
-    ├── gateway_sim.rs      # Fake gateway simulator for testing
-    └── decode_test.rs      # LoRaWAN frame decode tests
+    └── gateway_sim.rs            # Fake gateway simulator
 ```
+
+## Design Principle
+
+**Hoon owns the brains. Rust owns the wire.**
+
+All application logic — device state, subscriptions, access control, multi-ship
+peering — lives in Hoon as a Gall agent. Rust is a thin translation layer that
+handles raw UDP sockets and binary protocol parsing, then hands structured JSON
+to the ship via Airlock. See [PLAN.md](PLAN.md) for details.
 
 ## Phases
 
-### Phase 1 — Minimal Packet Receiver (current)
-- Semtech UDP Packet Forwarder server (receives PUSH_DATA, sends PUSH_ACK)
+### Phase 1 — Minimal Packet Receiver ✅
+- Semtech UDP server (receives PUSH_DATA, sends PUSH_ACK)
 - LoRaWAN PHY payload decoder (DevAddr, FCtrl, FPort, payload, MIC)
 - Gateway simulator for hardware-free testing
 - Configuration via TOML
 
-### Phase 2 — Urbit Bridge
-- Connect to local Urbit ship via Airlock HTTP API
-- Forward decoded packets as pokes to `%lora-agent`
-- Subscription support for real-time data streaming
+### Phase 2 — Gall Agent + Airlock Bridge (current)
+- **Hoon:** `%lora-agent` Gall app — device state, poke handlers, scry endpoints, subscription paths
+- **Rust:** Lightweight Airlock client (~150 LOC) — login, poke, done
+- End-to-end: simulated packet → Rust decode → Airlock poke → Hoon agent stores
 
-### Phase 3 — Gall Agent
-- `%lora-agent`: receives pokes, stores device state, publishes on paths
-- Remote ships subscribe over Ames for sensor data
-- No HTTP involved — pure Ames transport
+### Phase 3 — Ames Subscriptions & Downlinks
+- Remote ships subscribe to sensor data over Ames (pure Hoon)
+- Downlink queue in agent state, bridge polls via scry
+- Ship-to-ship encrypted data streaming — no cloud involved
 
-### Phase 4 — Helium Integration
-- OUI registration and route configuration
-- Helium Packet Router client (gRPC)
-- DevAddr management and session key handling
-- Data Credit monitoring
+### Phase 4 — Helium OUI Integration
+- OUI purchase ($235), route configuration
+- Helium packets arrive via same GWMP protocol — zero code changes to UDP server
+- Rust gRPC client for Config Service, MIC verification, AES decryption
 
-### Phase 5 — Full Ames Routing
-- Bidirectional: sensor data up, commands down
-- Device management over Ames
+### Phase 5 — Polish & Distribution
+- Distributable Urbit desk (`%lora`)
+- Web UI for device dashboard
 - Multi-ship mesh topologies
 
 ## Development
