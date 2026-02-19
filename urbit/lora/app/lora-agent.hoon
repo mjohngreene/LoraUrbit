@@ -1,219 +1,180 @@
 ::  app/lora-agent.hoon — LoraUrbit Gall Agent
 ::
 ::  Sovereign LoRaWAN device management powered by Urbit.
+::  Accepts JSON pokes from the Rust bridge via Airlock.
 ::
-::  Receives decoded LoRa packets from the Rust bridge via Airlock,
-::  stores device state, and publishes updates to subscribers
-::  (both local and remote ships over Ames).
-::
-::  Poke with %lora-action mark.
-::  Subscribe to /devices, /uplinks, or /uplinks/<dev-addr>.
-::  Scry at /x/devices, /x/device/<addr>, /x/downlink-queue.
-::
-/-  *lora-agent
+/+  default-agent, dbug
 |%
-+$  versioned-state
-  $%  [%0 state-0]
++$  card  card:agent:gall
+::
++$  device
+  $:  dev-addr=@t
+      name=(unit @t)
+      last-seen=@da
+      packet-count=@ud
   ==
+::
 +$  state-0
-  $:  devices=(map @t device)          ::  dev-addr → device
-      uplinks=(list uplink)            ::  recent uplink history
-      downlink-queue=(list downlink)   ::  pending downlinks
-      max-uplinks=@ud                  ::  max uplinks to retain
+  $:  %0
+      devices=(map @t device)
+      uplink-count=@ud
   ==
 --
-=|  state=state-0
-=*  state  -
 %-  agent:dbug
+=|  state-0
+=*  state  -
 ^-  agent:gall
 |_  =bowl:gall
 +*  this  .
     def   ~(. (default-agent this %.n) bowl)
 ::
 ++  on-init
-  ^-  (quip card:agent:gall _this)
+  ^-  (quip card _this)
   ~&  >  "lora-agent: initialized"
-  =.  max-uplinks  1.000
-  [~ this]
+  `this
 ::
-++  on-save
-  ^-  vase
-  !>(state)
+++  on-save  !>(state)
 ::
 ++  on-load
   |=  old-vase=vase
-  ^-  (quip card:agent:gall _this)
+  ^-  (quip card _this)
   ~&  >  "lora-agent: reloaded"
   =/  old  !<(state-0 old-vase)
-  [~ this(state old)]
+  `this(state old)
 ::
 ++  on-poke
   |=  [=mark =vase]
-  ^-  (quip card:agent:gall _this)
-  ?>  ?=(%lora-action mark)
-  =/  act  !<(action vase)
-  ?-  -.act
-  ::
-  ::  %uplink: new packet from Rust bridge
-  ::
-      %uplink
-    =/  ul  uplink.act
-    ~&  >  "lora-agent: uplink from {<dev-addr.ul>}"
-    ::  update or create device entry
+  ^-  (quip card _this)
+  ?+  mark  (on-poke:def mark vase)
+      %json
+    =/  jon=json  !<(json vase)
+    ?.  ?=([%o *] jon)
+      ~&  >>>  "lora-agent: expected JSON object"
+      `this
+    =/  obj  p.jon
+    =/  action-type=(unit json)  (~(get by obj) 'action')
+    ?~  action-type
+      ~&  >>>  "lora-agent: missing 'action' field"
+      `this
+    ?.  ?=([%s *] u.action-type)
+      ~&  >>>  "lora-agent: 'action' must be a string"
+      `this
+    =/  act=@t  p.u.action-type
+    ?+  act
+      ~&  >>>  "lora-agent: unknown action {<act>}"
+      `this
     ::
-    =/  dev  (~(gut by devices) dev-addr.ul *device)
-    =.  dev-addr.dev  dev-addr.ul
-    =.  last-seen.dev  received-at.ul
-    =.  packet-count.dev  +(packet-count.dev)
-    ::  update state
-    ::
-    =.  devices  (~(put by devices) dev-addr.ul dev)
-    =.  uplinks  (snoc uplinks ul)
-    ::  trim uplink history if over max
-    ::
-    =?  uplinks  (gth (lent uplinks) max-uplinks)
-      (slag (sub (lent uplinks) max-uplinks) uplinks)
-    ::  notify subscribers
-    ::
-    :_  this
-    :~  [%give %fact ~[/uplinks] %lora-update !>(^-([update [%new-uplink ul]]))]
-        [%give %fact ~[/uplinks/(scot %t dev-addr.ul)] %lora-update !>(^-([update [%new-uplink ul]]))]
-        [%give %fact ~[/devices] %lora-update !>(^-([update [%device-update dev]]))]
-    ==
-  ::
-  ::  %register-device: manually register/name a device
-  ::
-      %register-device
-    ~&  >  "lora-agent: registering device {<dev-addr.act>}"
-    =/  dev  (~(gut by devices) dev-addr.act *device)
-    =.  dev-addr.dev  dev-addr.act
-    =.  name.dev  name.act
-    =.  description.dev  description.act
-    =.  devices  (~(put by devices) dev-addr.act dev)
-    :_  this
-    :~  [%give %fact ~[/devices] %lora-update !>(^-([update [%device-update dev]]))]
-    ==
-  ::
-  ::  %downlink-request: queue a downlink command to a device
-  ::
-      %downlink-request
-    ~&  >  "lora-agent: downlink queued for {<dev-addr.act>}"
-    =/  dl=downlink
-      :*  dev-addr.act
-          f-port.act
-          payload.act
-          confirmed.act
-          now.bowl
-          %.n
+        %'uplink'
+      ::  extract dev-addr from JSON
+      =/  dev-addr=@t
+        =/  val  (~(got by obj) 'dev-addr')
+        ?>  ?=([%s *] val)
+        p.val
+      ~&  >  "lora-agent: uplink from {<dev-addr>}"
+      ::  update or create device entry
+      =/  dev=device
+        =/  existing  (~(get by devices) dev-addr)
+        ?~  existing
+          [dev-addr ~ now.bowl 1]
+        u.existing(last-seen now.bowl, packet-count +(packet-count.u.existing))
+      =.  devices  (~(put by devices) dev-addr dev)
+      =.  uplink-count  +(uplink-count)
+      ::  notify subscribers
+      =/  upd=json
+        %-  pairs:enjs:format
+        :~  ['type' s+'new-uplink']
+            ['dev-addr' s+dev-addr]
+        ==
+      :_  this
+      :~  [%give %fact ~[/uplinks] %json !>(upd)]
+          [%give %fact ~[/devices] %json !>(upd)]
       ==
-    =.  downlink-queue  (snoc downlink-queue dl)
-    [~ this]
-  ::
-  ::  %downlink-ack: bridge confirms downlink was sent (or failed)
-  ::
-      %downlink-ack
-    ~&  >  "lora-agent: downlink ack for {<dev-addr.act>} success={<success.act>}"
-    ::  remove the oldest matching downlink from queue
     ::
-    =.  downlink-queue
-      =/  found  %.n
-      %+  murn  downlink-queue
-      |=  dl=downlink
-      ?:  &(!found =(dev-addr.dl dev-addr.act))
-        =.  found  %.y
-        ~
-      (some dl)
-    :_  this
-    :~  [%give %fact ~[/devices] %lora-update !>(^-([update [%downlink-sent dev-addr.act success.act]]))]
+        %'register-device'
+      =/  dev-addr=@t
+        =/  val  (~(got by obj) 'dev-addr')
+        ?>  ?=([%s *] val)
+        p.val
+      =/  name=(unit @t)
+        =/  val  (~(get by obj) 'name')
+        ?~  val  ~
+        ?.  ?=([%s *] u.val)  ~
+        (some p.u.val)
+      ~&  >  "lora-agent: registering {<dev-addr>}"
+      =/  dev=device
+        =/  existing  (~(get by devices) dev-addr)
+        ?~  existing
+          [dev-addr name now.bowl 0]
+        u.existing(name name)
+      =.  devices  (~(put by devices) dev-addr dev)
+      =/  upd=json
+        %-  pairs:enjs:format
+        :~  ['type' s+'device-registered']
+            ['dev-addr' s+dev-addr]
+        ==
+      :_  this
+      :~  [%give %fact ~[/devices] %json !>(upd)]
+      ==
     ==
   ==
 ::
 ++  on-watch
   |=  =path
-  ^-  (quip card:agent:gall _this)
+  ^-  (quip card _this)
   ?+  path  (on-watch:def path)
-  ::
-  ::  /devices: subscribe to device registry updates
-  ::  on connect, send current device list
+      [%uplinks ~]
+    ~&  >  "lora-agent: subscriber on /uplinks"
+    `this
   ::
       [%devices ~]
-    ~&  >  "lora-agent: new subscriber on /devices"
-    =/  dev-list=(list device)  ~(val by devices)
-    :_  this
-    :~  [%give %fact ~ %lora-update !>(^-([update [%initial-devices dev-list]]))]
-    ==
-  ::
-  ::  /uplinks: subscribe to all uplink packets
-  ::
-      [%uplinks ~]
-    ~&  >  "lora-agent: new subscriber on /uplinks"
-    [~ this]
-  ::
-  ::  /uplinks/<dev-addr>: subscribe to uplinks from one device
-  ::
-      [%uplinks @ ~]
-    ~&  >  "lora-agent: new subscriber on /uplinks/{<i.t.path>}"
-    [~ this]
+    ~&  >  "lora-agent: subscriber on /devices"
+    `this
   ==
 ::
 ++  on-leave
   |=  =path
-  ^-  (quip card:agent:gall _this)
-  ~&  >  "lora-agent: subscriber left {<path>}"
-  [~ this]
+  ^-  (quip card _this)
+  `this
 ::
 ++  on-peek
   |=  =path
   ^-  (unit (unit cage))
   ?+  path  (on-peek:def path)
-  ::
-  ::  /x/devices — list all known devices
+      [%x %stats ~]
+    =/  result=json
+      %-  pairs:enjs:format
+      :~  ['device-count' (numb:enjs:format ~(wyt by devices))]
+          ['uplink-count' (numb:enjs:format uplink-count)]
+      ==
+    ``json+!>(result)
   ::
       [%x %devices ~]
-    =/  dev-list=(list device)  ~(val by devices)
-    ``!>(dev-list)
-  ::
-  ::  /x/device/<dev-addr> — single device state
-  ::
-      [%x %device @ ~]
-    =/  addr  i.t.t.path
-    =/  dev  (~(get by devices) addr)
-    ``!>(dev)
-  ::
-  ::  /x/uplinks — recent uplink history
-  ::
-      [%x %uplinks ~]
-    ``!>(uplinks)
-  ::
-  ::  /x/downlink-queue — pending downlinks (for Rust bridge to poll)
-  ::
-      [%x %downlink-queue ~]
-    =/  pending  (skim downlink-queue |=(dl=downlink !sent.dl))
-    ``!>(pending)
-  ::
-  ::  /x/stats — summary statistics
-  ::
-      [%x %stats ~]
-    =/  stats
-      :*  device-count=(~(wyt by devices))
-          uplink-count=(lent uplinks)
-          pending-downlinks=(lent (skim downlink-queue |=(dl=downlink !sent.dl)))
+    =/  dev-list=(list [@t device])  ~(tap by devices)
+    =/  result=json
+      :-  %a
+      %+  turn  dev-list
+      |=  [key=@t dev=device]
+      %-  pairs:enjs:format
+      :~  ['dev-addr' s+dev-addr.dev]
+          ['name' ?~(name.dev ~ s+u.name.dev)]
+          ['last-seen' (sect:enjs:format last-seen.dev)]
+          ['packet-count' (numb:enjs:format packet-count.dev)]
       ==
-    ``!>(stats)
+    ``json+!>(result)
   ==
 ::
 ++  on-agent
   |=  [=wire =sign:agent:gall]
-  ^-  (quip card:agent:gall _this)
+  ^-  (quip card _this)
   (on-agent:def wire sign)
 ::
 ++  on-arvo
   |=  [=wire =sign-arvo]
-  ^-  (quip card:agent:gall _this)
+  ^-  (quip card _this)
   (on-arvo:def wire sign-arvo)
 ::
 ++  on-fail
   |=  [=term =tang]
-  ^-  (quip card:agent:gall _this)
+  ^-  (quip card _this)
   (on-fail:def term tang)
 --
