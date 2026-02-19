@@ -110,7 +110,7 @@ async fn run_airlock_task(
         let json_data = serde_json::to_value(&action)
             .expect("failed to serialize LoRaAction");
 
-        match client.poke(&agent, "lora-action", json_data).await {
+        match client.poke(&agent, "json", json_data).await {
             Ok(()) => {
                 info!("Poked %{} with uplink from {}", agent, dev_addr);
             }
