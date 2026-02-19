@@ -2,14 +2,23 @@ pub mod protocol;
 
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::lorawan;
-use protocol::{GwmpPacket, PushDataPayload};
+use crate::lorawan::{self, LoRaWANFrame};
+use crate::urbit::types::{LoRaPacket, PacketSource};
+use protocol::{GwmpPacket, PushDataPayload, Rxpk};
 
 /// Run the Semtech UDP Packet Forwarder server
-pub async fn run_server(config: &Config) -> anyhow::Result<()> {
+///
+/// Decoded LoRaWAN packets are sent to `poke_tx` for forwarding to Urbit.
+/// If `poke_tx` is `None`, packets are decoded and logged but not forwarded
+/// (Phase 1 mode).
+pub async fn run_server(
+    config: &Config,
+    poke_tx: Option<mpsc::Sender<LoRaPacket>>,
+) -> anyhow::Result<()> {
     let socket = UdpSocket::bind(&config.udp.bind).await?;
     info!("UDP server listening on {}", config.udp.bind);
 
@@ -21,7 +30,7 @@ pub async fn run_server(config: &Config) -> anyhow::Result<()> {
 
         match GwmpPacket::parse(&buf[..len]) {
             Ok(packet) => {
-                handle_packet(&socket, src, packet).await;
+                handle_packet(&socket, src, packet, &poke_tx).await;
             }
             Err(e) => {
                 warn!("Failed to parse GWMP packet from {}: {}", src, e);
@@ -30,7 +39,12 @@ pub async fn run_server(config: &Config) -> anyhow::Result<()> {
     }
 }
 
-async fn handle_packet(socket: &UdpSocket, src: SocketAddr, packet: GwmpPacket) {
+async fn handle_packet(
+    socket: &UdpSocket,
+    src: SocketAddr,
+    packet: GwmpPacket,
+    poke_tx: &Option<mpsc::Sender<LoRaPacket>>,
+) {
     match packet {
         GwmpPacket::PushData {
             random_token,
@@ -66,8 +80,21 @@ async fn handle_packet(socket: &UdpSocket, src: SocketAddr, packet: GwmpPacket) 
                                         Ok(frame) => {
                                             info!("  LoRaWAN: {}", frame);
 
-                                            // TODO Phase 2: Forward to Urbit via Airlock
-                                            // TODO Phase 4: Handle Helium routing
+                                            // Forward to Urbit via mpsc channel
+                                            if let Some(tx) = poke_tx {
+                                                if let Some(lora_pkt) = frame_to_lora_packet(
+                                                    &frame,
+                                                    &rxpk,
+                                                    &gw_eui_hex,
+                                                ) {
+                                                    if let Err(e) = tx.send(lora_pkt).await {
+                                                        error!(
+                                                            "Failed to forward packet to Airlock task: {}",
+                                                            e
+                                                        );
+                                                    }
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             warn!("  Failed to decode LoRaWAN frame: {}", e);
@@ -116,6 +143,42 @@ async fn handle_packet(socket: &UdpSocket, src: SocketAddr, packet: GwmpPacket) 
                 "TX_ACK from gateway {} (token: 0x{:04x}): {:?}",
                 gw_eui_hex, random_token, json_payload
             );
+        }
+    }
+}
+
+/// Convert a decoded LoRaWAN frame + rxpk metadata into a LoRaPacket for Urbit
+fn frame_to_lora_packet(
+    frame: &LoRaWANFrame,
+    rxpk: &Rxpk,
+    gateway_eui: &str,
+) -> Option<LoRaPacket> {
+    match frame {
+        LoRaWANFrame::Data {
+            mtype,
+            dev_addr,
+            fcnt,
+            f_port,
+            frm_payload,
+            ..
+        } => Some(LoRaPacket {
+            dev_addr: format!("{:08X}", dev_addr),
+            fcnt: *fcnt,
+            f_port: *f_port,
+            payload: hex::encode(frm_payload),
+            rssi: rxpk.rssi,
+            snr: rxpk.lsnr,
+            freq: rxpk.freq,
+            data_rate: rxpk.datr.clone(),
+            gateway_eui: gateway_eui.to_string(),
+            received_at: chrono::Utc::now(),
+            mtype: mtype.to_string(),
+            source: PacketSource::Local,
+        }),
+        // JoinRequest, JoinAccept, Proprietary — skip for now
+        _ => {
+            debug!("Skipping non-data frame for Urbit forwarding");
+            None
         }
     }
 }

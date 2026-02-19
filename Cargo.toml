@@ -28,7 +28,10 @@ base64 = "0.22"
 anyhow = "1"
 
 # HTTP client (for Urbit Airlock, Phase 2)
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { version = "0.12", features = ["json", "cookies"], optional = true }
+
+# UUID generation (for Airlock channel IDs)
+uuid = { version = "1", features = ["v4"], optional = true }
 
 # Crypto (for LoRaWAN MIC verification)
 aes = { version = "0.8", optional = true }
@@ -44,9 +47,9 @@ hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 
 [features]
-default = ["phase1"]
+default = ["phase2"]
 phase1 = []                                    # UDP server + LoRaWAN decoder
-phase2 = ["phase1", "dep:reqwest"]             # + Urbit Airlock bridge
+phase2 = ["phase1", "dep:reqwest", "dep:uuid"]  # + Urbit Airlock bridge
 phase3 = ["phase2"]                            # + Gall agent support
 phase4 = ["phase3", "dep:aes", "dep:cmac"]     # + Helium integration
 full = ["phase4"]
