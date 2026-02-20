@@ -90,6 +90,21 @@
           [%give %fact ~[/devices] %json !>(upd)]
       ==
     ::
+        %'subscribe-remote'
+      ::  subscribe to a remote ship's lora-agent
+      =/  target-ship=@p
+        =/  val  (~(got by obj) 'ship')
+        ?>  ?=([%s *] val)
+        (slav %p p.val)
+      =/  sub-path=path
+        =/  val  (~(got by obj) 'path')
+        ?>  ?=([%s *] val)
+        (stab p.val)
+      ~&  >  "lora-agent: subscribing to {<target-ship>} on {<sub-path>}"
+      :_  this
+      :~  [%pass /remote-uplinks %agent [target-ship %lora-agent] %watch sub-path]
+      ==
+    ::
         %'register-device'
       =/  dev-addr=@t
         =/  val  (~(got by obj) 'dev-addr')
@@ -166,7 +181,28 @@
 ++  on-agent
   |=  [=wire =sign:agent:gall]
   ^-  (quip card _this)
-  (on-agent:def wire sign)
+  ?+  wire  (on-agent:def wire sign)
+      [%remote-uplinks ~]
+    ?+  -.sign  (on-agent:def wire sign)
+        %fact
+      =/  jon=json  !<(json q.cage.sign)
+      ~&  >  "lora-agent: received remote uplink: {<jon>}"
+      `this
+    ::
+        %watch-ack
+      ?~  p.sign
+        ~&  >  "lora-agent: remote subscription confirmed"
+        `this
+      ~&  >>>  "lora-agent: remote subscription failed"
+      `this
+    ::
+        %kick
+      ~&  >  "lora-agent: remote subscription kicked, resubscribing..."
+      :_  this
+      :~  [%pass /remote-uplinks %agent [src.bowl %lora-agent] %watch /uplinks]
+      ==
+    ==
+  ==
 ::
 ++  on-arvo
   |=  [=wire =sign-arvo]
