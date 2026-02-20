@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// A decoded LoRa packet ready to be poked into %lora-agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct LoRaPacket {
     /// Device address (from LoRaWAN MAC header)
     pub dev_addr: String,

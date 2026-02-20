@@ -10,12 +10,12 @@ decrypt_payload = false
 
 [urbit]
 # Urbit ship Airlock connection (Phase 2+)
-# url = "http://127.0.0.1:80"
-# ship = "~your-ship-name"
-# code = "+code output"
-# agent = "lora-agent"
+url = "http://localhost:8080"
+ship = "zod"
+code = "lidlut-tabwed-pillex-ridrup"
+agent = "lora-agent"
 
-[helium]
+# [helium]
 # Helium network integration (Phase 4+)
 # oui = 0
 # net_id = "00003C"
