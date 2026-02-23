@@ -50,9 +50,19 @@ pub enum GwmpPacket {
         gateway_eui: GatewayEui,
         json_payload: String,
     },
+    PushAck {
+        random_token: u16,
+    },
     PullData {
         random_token: u16,
         gateway_eui: GatewayEui,
+    },
+    PullResp {
+        random_token: u16,
+        json_payload: String,
+    },
+    PullAck {
+        random_token: u16,
     },
     TxAck {
         random_token: u16,
@@ -97,6 +107,41 @@ pub struct Rxpk {
 pub struct PushDataPayload {
     pub rxpk: Option<Vec<Rxpk>>,
     pub stat: Option<serde_json::Value>,
+}
+
+/// Txpk (transmit packet) for PULL_RESP downlinks (server → gateway)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Txpk {
+    /// Send immediately (true) or use timestamp
+    pub imme: Option<bool>,
+    /// Concentrator timestamp for scheduled TX (microseconds)
+    pub tmst: Option<u64>,
+    /// Frequency in MHz
+    pub freq: f64,
+    /// RF chain to use
+    pub rfch: Option<u8>,
+    /// TX output power in dBm
+    pub powe: Option<u8>,
+    /// Modulation ("LORA" or "FSK")
+    pub modu: Option<String>,
+    /// LoRa datarate identifier (e.g., "SF7BW125")
+    pub datr: String,
+    /// LoRa coding rate (e.g., "4/5")
+    pub codr: Option<String>,
+    /// Invert LoRa polarization (true for downlinks)
+    pub ipol: Option<bool>,
+    /// RF packet payload size in bytes
+    pub size: u16,
+    /// Base64 encoded RF packet payload
+    pub data: String,
+    /// No CRC for downlink (true)
+    pub ncrc: Option<bool>,
+}
+
+/// Pull resp JSON wrapper
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PullRespPayload {
+    pub txpk: Txpk,
 }
 
 impl GwmpPacket {
@@ -148,6 +193,21 @@ impl GwmpPacket {
                     gateway_eui,
                 })
             }
+            PacketType::PushAck => {
+                Ok(GwmpPacket::PushAck { random_token })
+            }
+            PacketType::PullResp => {
+                let json_payload = String::from_utf8(buf.to_vec())
+                    .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in PULL_RESP payload: {}", e))?;
+
+                Ok(GwmpPacket::PullResp {
+                    random_token,
+                    json_payload,
+                })
+            }
+            PacketType::PullAck => {
+                Ok(GwmpPacket::PullAck { random_token })
+            }
             PacketType::TxAck => {
                 if buf.remaining() < 8 {
                     return Err(anyhow::anyhow!("TX_ACK too short for gateway EUI"));
@@ -170,10 +230,6 @@ impl GwmpPacket {
                     json_payload,
                 })
             }
-            _ => Err(anyhow::anyhow!(
-                "Unexpected packet type for parsing: {:?}",
-                packet_type
-            )),
         }
     }
 
@@ -192,6 +248,51 @@ impl GwmpPacket {
         buf.put_u8(PROTOCOL_VERSION);
         buf.put_u16(random_token);
         buf.put_u8(PacketType::PullAck as u8);
+        buf.to_vec()
+    }
+
+    /// Build a PUSH_DATA packet (gateway → server)
+    pub fn push_data(random_token: u16, gateway_eui: &GatewayEui, json_payload: &str) -> Vec<u8> {
+        let mut buf = BytesMut::with_capacity(12 + json_payload.len());
+        buf.put_u8(PROTOCOL_VERSION);
+        buf.put_u16(random_token);
+        buf.put_u8(PacketType::PushData as u8);
+        buf.put_slice(gateway_eui);
+        buf.put_slice(json_payload.as_bytes());
+        buf.to_vec()
+    }
+
+    /// Build a PULL_RESP packet (server → gateway, carries downlink)
+    pub fn pull_resp(random_token: u16, json_payload: &str) -> Vec<u8> {
+        let mut buf = BytesMut::with_capacity(4 + json_payload.len());
+        buf.put_u8(PROTOCOL_VERSION);
+        buf.put_u16(random_token);
+        buf.put_u8(PacketType::PullResp as u8);
+        buf.put_slice(json_payload.as_bytes());
+        buf.to_vec()
+    }
+
+    /// Build a PULL_DATA packet (gateway → server, keepalive)
+    pub fn pull_data(random_token: u16, gateway_eui: &GatewayEui) -> Vec<u8> {
+        let mut buf = BytesMut::with_capacity(12);
+        buf.put_u8(PROTOCOL_VERSION);
+        buf.put_u16(random_token);
+        buf.put_u8(PacketType::PullData as u8);
+        buf.put_slice(gateway_eui);
+        buf.to_vec()
+    }
+
+    /// Build a TX_ACK packet (gateway → server, downlink confirmation)
+    pub fn tx_ack(random_token: u16, gateway_eui: &GatewayEui, json_payload: Option<&str>) -> Vec<u8> {
+        let json_len = json_payload.map(|j| j.len()).unwrap_or(0);
+        let mut buf = BytesMut::with_capacity(12 + json_len);
+        buf.put_u8(PROTOCOL_VERSION);
+        buf.put_u16(random_token);
+        buf.put_u8(PacketType::TxAck as u8);
+        buf.put_slice(gateway_eui);
+        if let Some(json) = json_payload {
+            buf.put_slice(json.as_bytes());
+        }
         buf.to_vec()
     }
 }

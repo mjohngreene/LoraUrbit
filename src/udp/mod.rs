@@ -144,6 +144,22 @@ async fn handle_packet(
                 gw_eui_hex, random_token, json_payload
             );
         }
+        GwmpPacket::PushAck { random_token } => {
+            debug!("PUSH_ACK (token: 0x{:04x})", random_token);
+        }
+        GwmpPacket::PullAck { random_token } => {
+            debug!("PULL_ACK (token: 0x{:04x})", random_token);
+        }
+        GwmpPacket::PullResp {
+            random_token,
+            json_payload,
+        } => {
+            debug!(
+                "PULL_RESP (token: 0x{:04x}): {} bytes",
+                random_token,
+                json_payload.len()
+            );
+        }
     }
 }
 
