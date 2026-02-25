@@ -1,9 +1,9 @@
 ::  sur/lora-agent.hoon — Type definitions for %lora-agent
 ::
 ::  Defines the core types for LoraUrbit: uplink packets, device state,
-::  poke actions, and subscription updates. These types are the contract
-::  between the Rust bridge (which sends JSON pokes) and the Gall agent
-::  (which stores and routes data).
+::  peer-to-peer messaging, poke actions, and subscription updates.
+::  These types are the contract between the Rust bridge (which sends
+::  JSON pokes) and the Gall agent (which stores and routes data).
 ::
 |%
 ::  +packet-source: where the packet originated
@@ -69,10 +69,47 @@
       sent=?               ::  has the bridge picked this up?
   ==
 ::
+::  === Peer-to-peer messaging types (Phase 3c) ===
+::
+::  +peer-status: whether a peer is reachable
+::
++$  peer-status  ?(%online %offline)
+::
+::  +peer: a known peer ship with its LoRa device address
+::
++$  peer
+  $:  =ship
+      dev-addr=@t
+      last-seen=@da
+      status=peer-status
+  ==
+::
+::  +outbound-msg: a message queued for transmission via LoRa
+::
++$  outbound-msg
+  $:  id=@ud
+      dest-ship=@p
+      dest-addr=@t
+      payload=@t
+      queued-at=@da
+      sent=?
+  ==
+::
+::  +inbound-msg: a message received from the LoRa network
+::
++$  inbound-msg
+  $:  id=@ud
+      src-ship=(unit @p)
+      src-addr=@t
+      payload=@t
+      received-at=@da
+  ==
+::
 ::  +action: poke actions accepted by %lora-agent
 ::
 ::  The Rust bridge pokes us with %uplink when it decodes a packet.
 ::  Users/agents poke with %register-device or %downlink-request.
+::  Phase 3c adds peer-to-peer messaging actions.
 ::
 +$  action
   $%  [%uplink =uplink]
@@ -88,6 +125,13 @@
           confirmed=?
       ==
       [%downlink-ack dev-addr=@t success=?]
+      ::  peer-to-peer actions
+      [%register-peer =ship dev-addr=@t]
+      [%send-message dest=@p payload=@t]
+      [%message-received src-addr=@t payload=@t]
+      [%set-identity dev-addr=@t]
+      [%tx-ack msg-id=@ud]
+      [%tx-fail msg-id=@ud]
   ==
 ::
 ::  +update: subscription updates sent to watchers
@@ -97,5 +141,11 @@
       [%device-update =device]
       [%downlink-sent dev-addr=@t success=?]
       [%initial-devices devices=(list device)]
+      ::  peer-to-peer updates
+      [%peer-registered =peer]
+      [%message-queued =outbound-msg]
+      [%message-sent msg-id=@ud]
+      [%message-failed msg-id=@ud]
+      [%new-message =inbound-msg]
   ==
 --
