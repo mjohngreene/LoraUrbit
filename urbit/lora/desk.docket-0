@@ -1,0 +1,10 @@
+:~
+  title+'LoraUrbit'
+  info+'Sovereign LoRaWAN peer-to-peer messaging'
+  color+0x3b.82f6
+  version+[0 3 0]
+  website+'https://github.com/mjohngreene/LoraUrbit'
+  license+'MIT'
+  base+'lora'
+  glob-ames+[~zod 0v0]
+==
