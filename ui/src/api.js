@@ -2,11 +2,29 @@ import Urbit from '@urbit/http-api';
 
 let api = null;
 
+// In dev mode (Vite), we proxy to localhost:8080 (fakezod).
+// In production (served from Urbit), auth is already handled.
+const DEV_CODE = 'lidlut-tabwed-pillex-ridrup';
+const isDev = import.meta.env.DEV;
+
 export async function getApi() {
   if (api) return api;
-  api = new Urbit('');
-  api.ship = window.ship;
-  await api.connect();
+
+  if (isDev) {
+    // Use the library's built-in auth flow
+    api = await Urbit.authenticate({
+      ship: 'zod',
+      url: '',
+      code: DEV_CODE,
+      verbose: false,
+    });
+  } else {
+    // Production: served from Urbit, already authenticated
+    api = new Urbit('');
+    api.ship = window.ship;
+    await api.eventSource();
+  }
+
   return api;
 }
 
