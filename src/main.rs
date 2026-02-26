@@ -125,7 +125,7 @@ async fn run_airlock_task(
     while let Some(packet) = rx.recv().await {
         let dev_addr = packet.dev_addr.clone();
 
-        // Wrap the packet in a LoRaAction::Uplink
+        // Poke: device-tracking uplink (also handles peer-to-peer via Hoon agent)
         let action = LoRaAction::Uplink(packet);
         let json_data = serde_json::to_value(&action)
             .expect("failed to serialize LoRaAction");
@@ -149,6 +149,11 @@ async fn run_airlock_task(
                 }
             }
         }
+
+        // Note: peer-to-peer message routing is handled in the Hoon
+        // agent's %uplink handler. When DevAddr matches a registered peer,
+        // the agent automatically routes the message to the inbox.
+        // No separate message-received poke needed from the bridge.
     }
 
     // Channel closed — shutdown
@@ -232,12 +237,14 @@ async fn run_outbound_task(
                 msg.id, msg.dest_ship, msg.dest_addr, msg.payload
             );
 
-            // Parse the destination DevAddr (hex string → u32)
-            let dev_addr = match u32::from_str_radix(&msg.dest_addr, 16) {
+            // Use the SENDER's DevAddr in the LoRaWAN frame header.
+            // This way, the receiving bridge identifies the source of the message.
+            // Fall back to dest_addr if src_addr is not set.
+            let addr_hex = if !msg.src_addr.is_empty() { &msg.src_addr } else { &msg.dest_addr };
+            let dev_addr = match u32::from_str_radix(addr_hex, 16) {
                 Ok(addr) => addr,
                 Err(e) => {
-                    error!("Invalid dest_addr '{}': {}", msg.dest_addr, e);
-                    // Poke tx-fail
+                    error!("Invalid addr '{}': {}", addr_hex, e);
                     let _ = client.poke(&agent, "json", TxAck::failure(msg.id)).await;
                     continue;
                 }

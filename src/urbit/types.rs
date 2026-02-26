@@ -91,10 +91,13 @@ pub struct OutboundMessage {
     pub dest_ship: String,
     /// Destination LoRa device address (e.g. "01AB5678")
     pub dest_addr: String,
+    /// Source LoRa device address (sender's own DevAddr)
+    #[serde(default)]
+    pub src_addr: String,
     /// Application payload (hex-encoded)
     pub payload: String,
-    /// When the message was queued
-    pub queued_at: String,
+    /// When the message was queued (Urbit time as unix seconds)
+    pub queued_at: serde_json::Value,
 }
 
 /// TX acknowledgment poke — tells the agent a message was sent

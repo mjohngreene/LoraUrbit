@@ -142,14 +142,60 @@
         u.existing(last-seen now.bowl, packet-count +(packet-count.u.existing))
       =.  devices  (~(put by devices) dev-addr dev)
       =.  uplink-count  +(uplink-count)
+      ::  check if this DevAddr belongs to a registered peer
+      =/  sender=(unit @p)
+        =/  peer-list  ~(tap by peers)
+        =/  found=(unit @p)  ~
+        |-
+        ?~  peer-list  found
+        =/  item  i.peer-list
+        ?:  =(dev-addr.q.item dev-addr)
+          (some p.item)
+        $(peer-list t.peer-list)
+      ?~  sender
+        ::  not a peer — just log the uplink
+        =/  upd=json
+          %-  pairs:enjs:format
+          :~  ['type' s+'new-uplink']
+              ['dev-addr' s+dev-addr]
+          ==
+        :_  this
+        :~  [%give %fact ~[/uplinks] %json !>(upd)]
+            [%give %fact ~[/devices] %json !>(upd)]
+        ==
+      ::  peer message! extract payload and route to inbox
+      =/  payload=@t
+        =/  val  (~(get by obj) 'payload')
+        ?~  val  ''
+        ?.  ?=([%s *] u.val)  ''
+        p.u.val
+      ~&  >  "lora-agent: peer uplink from {<u.sender>} ({<dev-addr>}) payload={<payload>}"
+      ::  update peer last-seen
+      =/  existing  (~(get by peers) u.sender)
+      =?  peers  ?=(^ existing)
+        (~(put by peers) u.sender u.existing(last-seen now.bowl, status %online))
+      ::  add to inbox
+      =/  msg=inbound-msg
+        :*  next-msg-id
+            (some u.sender)
+            dev-addr
+            payload
+            now.bowl
+        ==
+      =.  inbox  (snoc inbox msg)
+      =.  next-msg-id  +(next-msg-id)
       =/  upd=json
         %-  pairs:enjs:format
-        :~  ['type' s+'new-uplink']
-            ['dev-addr' s+dev-addr]
+        :~  ['type' s+'new-message']
+            ['id' (numb:enjs:format id.msg)]
+            ['src-ship' s+(scot %p u.sender)]
+            ['src-addr' s+dev-addr]
+            ['payload' s+payload]
         ==
       :_  this
       :~  [%give %fact ~[/uplinks] %json !>(upd)]
           [%give %fact ~[/devices] %json !>(upd)]
+          [%give %fact ~[/inbox] %json !>(upd)]
       ==
     ::
         %'register-device'
@@ -432,6 +478,7 @@
       :~  ['id' (numb:enjs:format id.m)]
           ['dest-ship' s+(scot %p dest-ship.m)]
           ['dest-addr' s+dest-addr.m]
+          ['src-addr' ?~(my-addr s+'' s+u.my-addr)]
           ['payload' s+payload.m]
           ['queued-at' (sect:enjs:format queued-at.m)]
       ==
