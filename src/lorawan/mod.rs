@@ -1,3 +1,4 @@
+pub mod encoder;
 pub mod keys;
 
 use std::fmt;

@@ -45,10 +45,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Phase 2: Set up Urbit Airlock pipeline
     #[cfg(feature = "phase2")]
-    let poke_tx = if let Some(ref urbit_config) = config.urbit {
+    let (poke_tx, urbit_config_clone) = if let Some(ref urbit_config) = config.urbit {
         let (tx, rx) = tokio::sync::mpsc::channel::<urbit::types::LoRaPacket>(256);
 
-        // Spawn the Airlock forwarder task
+        // Spawn the Airlock forwarder task (uplink: LoRa → Urbit)
         let airlock_config = urbit_config.clone();
         tokio::spawn(async move {
             if let Err(e) = run_airlock_task(airlock_config, rx).await {
@@ -57,19 +57,22 @@ async fn main() -> anyhow::Result<()> {
         });
 
         info!("Urbit bridge enabled (Phase 2)");
-        Some(tx)
+        (Some(tx), Some(urbit_config.clone()))
     } else {
         info!("Urbit bridge not configured (Phase 1 mode)");
-        None
+        (None, None)
     };
 
     #[cfg(not(feature = "phase2"))]
-    let poke_tx: Option<tokio::sync::mpsc::Sender<urbit::types::LoRaPacket>> = {
+    let (poke_tx, urbit_config_clone): (
+        Option<tokio::sync::mpsc::Sender<urbit::types::LoRaPacket>>,
+        Option<config::UrbitConfig>,
+    ) = {
         if config.urbit.is_some() {
             info!("Urbit config found but phase2 feature not enabled");
         }
         info!("Running in Phase 1 mode (decode only)");
-        None
+        (None, None)
     };
 
     // Phase 4: Initialize Helium client
@@ -80,9 +83,26 @@ async fn main() -> anyhow::Result<()> {
         info!("Helium integration not configured");
     }
 
-    // Start the UDP server (Phase 1 core)
+    // Start the UDP server (Phase 1 core) — returns a DownlinkSender handle
     info!("Starting Semtech UDP Packet Forwarder server...");
-    udp::run_server(&config, poke_tx).await?;
+    let downlink_sender = udp::start_server(&config, poke_tx).await?;
+
+    // Phase 3a: Spawn outbound message queue (polls Urbit outbox → sends downlinks)
+    #[cfg(feature = "phase2")]
+    if let Some(urbit_cfg) = urbit_config_clone {
+        let dl_sender = downlink_sender.clone();
+        tokio::spawn(async move {
+            if let Err(e) = run_outbound_task(urbit_cfg, dl_sender).await {
+                error!("Outbound task failed: {}", e);
+            }
+        });
+        info!("Outbound message queue enabled (Phase 3a)");
+    }
+
+    // Keep the main task alive (the UDP server runs in a background task now)
+    info!("Bridge running. Press Ctrl+C to stop.");
+    tokio::signal::ctrl_c().await?;
+    info!("Shutting down...");
 
     Ok(())
 }
@@ -135,4 +155,142 @@ async fn run_airlock_task(
     info!("Packet channel closed, disconnecting Airlock client...");
     client.disconnect().await;
     Ok(())
+}
+
+/// Background task that polls the Urbit agent's outbox and sends downlinks
+///
+/// Phase 3a: Scry the outbox every 2 seconds, convert pending messages to
+/// LoRaWAN frames, send as PULL_RESP to the gateway, and poke tx-ack/tx-fail.
+#[cfg(feature = "phase2")]
+async fn run_outbound_task(
+    config: config::UrbitConfig,
+    downlink_sender: udp::DownlinkSender,
+) -> anyhow::Result<()> {
+    use base64::Engine;
+    use urbit::types::{OutboundMessage, TxAck};
+    use lorawan::encoder::FrameBuilder;
+    use udp::build_txpk;
+
+    let agent = config.agent.clone();
+    let mut client = urbit::AirlockClient::new(config);
+
+    // Connect with retry
+    client.connect_with_retry(5).await?;
+    info!("Outbound task connected, polling outbox every 2s...");
+
+    let mut fcnt: u16 = 0; // Frame counter for downlinks (simple incrementing)
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Scry the outbox
+        let outbox = match client.scry(&agent, "/outbox").await {
+            Ok(val) => val,
+            Err(e) => {
+                tracing::warn!("Failed to scry outbox: {}", e);
+
+                // If auth expired, try to reconnect
+                if !client.is_connected() {
+                    info!("Outbound task: attempting reconnect...");
+                    if let Err(re) = client.connect_with_retry(3).await {
+                        error!("Outbound task reconnect failed: {}", re);
+                    }
+                }
+                continue;
+            }
+        };
+
+        // Parse the outbox JSON array
+        let messages: Vec<OutboundMessage> = match serde_json::from_value(outbox.clone()) {
+            Ok(msgs) => msgs,
+            Err(_) => {
+                // The scry might return nested JSON — try unwrapping common patterns
+                if let Some(arr) = outbox.as_array() {
+                    match serde_json::from_value(serde_json::Value::Array(arr.clone())) {
+                        Ok(msgs) => msgs,
+                        Err(e) => {
+                            tracing::debug!("No parseable outbox messages: {}", e);
+                            continue;
+                        }
+                    }
+                } else {
+                    tracing::debug!("Outbox is not an array: {}", outbox);
+                    continue;
+                }
+            }
+        };
+
+        if messages.is_empty() {
+            continue;
+        }
+
+        info!("Outbox has {} pending message(s)", messages.len());
+
+        for msg in &messages {
+            info!(
+                "Processing outbound msg #{}: dest={} ({}) payload={}",
+                msg.id, msg.dest_ship, msg.dest_addr, msg.payload
+            );
+
+            // Parse the destination DevAddr (hex string → u32)
+            let dev_addr = match u32::from_str_radix(&msg.dest_addr, 16) {
+                Ok(addr) => addr,
+                Err(e) => {
+                    error!("Invalid dest_addr '{}': {}", msg.dest_addr, e);
+                    // Poke tx-fail
+                    let _ = client.poke(&agent, "json", TxAck::failure(msg.id)).await;
+                    continue;
+                }
+            };
+
+            // Decode the hex payload
+            let payload_bytes = match hex::decode(&msg.payload) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    error!("Invalid hex payload '{}': {}", msg.payload, e);
+                    let _ = client.poke(&agent, "json", TxAck::failure(msg.id)).await;
+                    continue;
+                }
+            };
+
+            // Build the LoRaWAN frame
+            let frame = FrameBuilder::new_downlink(dev_addr, fcnt, 1, payload_bytes);
+            let frame_bytes = frame.build();
+            fcnt = fcnt.wrapping_add(1);
+
+            // Base64 encode for txpk
+            let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&frame_bytes);
+            let size = frame_bytes.len() as u16;
+
+            // Build txpk and send PULL_RESP
+            let txpk = build_txpk(&payload_b64, size);
+
+            match downlink_sender.send_downlink(&txpk).await {
+                Ok(()) => {
+                    info!("Downlink sent for msg #{}", msg.id);
+                    // Poke tx-ack
+                    match client.poke(&agent, "json", TxAck::success(msg.id)).await {
+                        Ok(()) => {
+                            info!("Poked %{} with tx-ack for msg #{}", agent, msg.id);
+                        }
+                        Err(e) => {
+                            error!("Failed to poke tx-ack for msg #{}: {}", msg.id, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to send downlink for msg #{}: {}", msg.id, e);
+                    // Poke tx-fail
+                    match client.poke(&agent, "json", TxAck::failure(msg.id)).await {
+                        Ok(()) => {
+                            info!("Poked %{} with tx-fail for msg #{}", agent, msg.id);
+                        }
+                        Err(e2) => {
+                            error!("Failed to poke tx-fail for msg #{}: {}", msg.id, e2);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

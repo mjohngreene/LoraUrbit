@@ -1,0 +1,18 @@
+# LoraUrbit Configuration — Site B (Bridge B → ~bus)
+#
+# Usage: cargo run -- --config config-b.toml
+
+[udp]
+bind = "0.0.0.0:1681"
+
+[lorawan]
+decrypt_payload = false
+
+[urbit]
+url = "http://localhost:8081"
+ship = "bus"
+code = "riddec-bicrym-ridlev-pocsef"
+agent = "lora-agent"
+
+[logging]
+level = "info"

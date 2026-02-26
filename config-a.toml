@@ -1,0 +1,18 @@
+# LoraUrbit Configuration — Site A (Bridge A → ~zod)
+#
+# Usage: cargo run -- --config config-a.toml
+
+[udp]
+bind = "0.0.0.0:1680"
+
+[lorawan]
+decrypt_payload = false
+
+[urbit]
+url = "http://localhost:8080"
+ship = "zod"
+code = "lidlut-tabwed-pillex-ridrup"
+agent = "lora-agent"
+
+[logging]
+level = "info"

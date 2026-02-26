@@ -284,6 +284,48 @@ impl AirlockClient {
     pub fn is_connected(&self) -> bool {
         self.connected
     }
+
+    /// Scry a Gall agent — authenticated GET to /~/scry/{app}{path}.json
+    ///
+    /// Returns the JSON value from the scry endpoint.
+    /// The path should NOT include the trailing `.json` — it is added automatically.
+    ///
+    /// Example: `client.scry("lora-agent", "/outbox")` →
+    ///   GET {url}/~/scry/lora-agent/outbox.json
+    pub async fn scry(&self, app: &str, path: &str) -> Result<serde_json::Value> {
+        if !self.connected {
+            anyhow::bail!("not connected — call connect() first");
+        }
+
+        let scry_url = format!("{}/~/scry/{}{}.json", self.config.url, app, path);
+        debug!("Scrying {} at {}", app, scry_url);
+
+        let resp = self
+            .http
+            .get(&scry_url)
+            .send()
+            .await
+            .context("failed to send scry request")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("scry failed with status {}: {}", status, body_text);
+        }
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .context("failed to parse scry response as JSON")?;
+
+        debug!("Scry response: {}", json);
+        Ok(json)
+    }
+
+    /// Get the Urbit config (for reading agent name, etc.)
+    pub fn config(&self) -> &UrbitConfig {
+        &self.config
+    }
 }
 
 #[cfg(test)]
@@ -317,5 +359,24 @@ mod tests {
         let client1 = AirlockClient::new(config.clone());
         let client2 = AirlockClient::new(config);
         assert_ne!(client1.channel_id, client2.channel_id);
+    }
+
+    #[test]
+    fn test_scry_requires_connection() {
+        let config = UrbitConfig {
+            url: "http://localhost:8080".to_string(),
+            ship: "zod".to_string(),
+            code: "test-code".to_string(),
+            agent: "lora-agent".to_string(),
+        };
+
+        let client = AirlockClient::new(config);
+        assert!(!client.is_connected());
+
+        // Scry should fail when not connected
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(client.scry("lora-agent", "/outbox"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not connected"));
     }
 }
