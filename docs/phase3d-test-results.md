@@ -1,9 +1,9 @@
 # Phase 3d — End-to-End Integration Test Results
 
 **Date:** 2026-02-26
-**Status:** ✅ PASS — Bidirectional peer-to-peer messaging verified
+**Environment:** Mac mini (arm64), all processes on localhost
 
-## Architecture
+## Topology
 
 ```
 ~zod (%lora-agent)                          ~bus (%lora-agent)
@@ -14,21 +14,34 @@ Gateway A (UDP 1700)                        Gateway B (UDP 1701)
     └──────── localhost UDP link ───────────────┘
 ```
 
-## Identity Configuration
+## Components
 
-| Ship | DevAddr    | Role    |
-|------|-----------|---------|
-| ~zod | 260B1234  | Sender/Receiver |
-| ~bus | 01AB5678  | Sender/Receiver |
+| Component | tmux session | Config |
+|-----------|-------------|--------|
+| ~zod (fakezod) | `zod` | port 8080, +code: `lidlut-tabwed-pillex-ridrup` |
+| ~bus (fakebus) | `bus` | port 8081, +code: `riddec-bicrym-ridlev-pocsef` |
+| Gateway Pair | `gateway-pair` | A=1700, B=1701 |
+| Bridge A | `bridge-a` | config-a.toml (UDP 1680 → ~zod) |
+| Bridge B | `bridge-b` | config-b.toml (UDP 1681 → ~bus) |
 
 ## Test 1: ~zod → ~bus ("Hello")
 
-**Command on ~zod:**
+**Setup:**
 ```
-:lora-agent &json '{"action":"send-message","dest":"~bus","payload":"48656C6C6F"}'
+~zod:  :lora-agent &json '{"action":"set-identity","dev-addr":"260B1234"}'
+~zod:  :lora-agent &json '{"action":"register-peer","ship":"~bus","dev-addr":"01AB5678"}'
+~bus:  :lora-agent &json '{"action":"set-identity","dev-addr":"01AB5678"}'
+~bus:  :lora-agent &json '{"action":"register-peer","ship":"~zod","dev-addr":"260B1234"}'
 ```
 
-**~bus inbox result:**
+**Send:**
+```
+~zod:  :lora-agent &json '{"action":"send-message","dest":"~bus","payload":"48656C6C6F"}'
+```
+
+**Result: ✅ SUCCESS**
+
+~bus inbox entry:
 ```json
 {
     "received-at": 1772123360,
@@ -39,16 +52,18 @@ Gateway A (UDP 1700)                        Gateway B (UDP 1701)
 }
 ```
 
-**Result:** ✅ Message received with correct sender identity resolved via peer registry.
+Flow verified: Bridge A polled outbox → built LoRaWAN frame with ~zod's DevAddr (260B1234) → PULL_RESP to Gateway A → relayed to Gateway B → PUSH_DATA to Bridge B → decoded uplink → Hoon agent resolved DevAddr to ~zod → routed to inbox.
 
 ## Test 2: ~bus → ~zod ("World")
 
-**Command on ~bus:**
+**Send:**
 ```
-:lora-agent &json '{"action":"send-message","dest":"~zod","payload":"576F726C64"}'
+~bus:  :lora-agent &json '{"action":"send-message","dest":"~zod","payload":"576F726C64"}'
 ```
 
-**~zod inbox result:**
+**Result: ✅ SUCCESS**
+
+~zod inbox entry:
 ```json
 {
     "received-at": 1772123453,
@@ -59,35 +74,68 @@ Gateway A (UDP 1700)                        Gateway B (UDP 1701)
 }
 ```
 
-**Result:** ✅ Message received with correct sender identity resolved via peer registry.
+Bidirectional communication confirmed.
 
-## Message Flow (verified via logs)
+## Final State
 
-1. **Hoon agent** queues message in outbox with `src-addr` (sender's DevAddr)
-2. **Bridge A** polls outbox via scry, builds LoRaWAN frame with:
-   - DevAddr = destination's address
-   - FRMPayload = [4-byte src-addr prefix] + [application payload]
-3. **Bridge A** sends PULL_RESP to Gateway A (Semtech UDP)
-4. **Gateway A** relays downlink as PUSH_DATA uplink to Gateway B
-5. **Gateway B** forwards PUSH_DATA to Bridge B
-6. **Bridge B** decodes LoRaWAN frame, extracts:
-   - src-addr from first 4 bytes of FRMPayload
-   - payload from remaining bytes
-7. **Bridge B** pokes `%lora-agent` with `message-received` action
-8. **Hoon agent** resolves src-addr → ship via peer registry, adds to inbox
+### ~zod
+```json
+{
+    "inbox-count": 3,
+    "peer-count": 1,
+    "device-count": 5,
+    "outbox-count": 9,
+    "uplink-count": 10
+}
+```
+Peers: `[{"ship": "~bus", "dev-addr": "01AB5678", "status": "online"}]`
+Outbox: `[]` (all messages transmitted)
 
-## Code Changes Made
+### ~bus
+```json
+{
+    "inbox-count": 8,
+    "peer-count": 1,
+    "device-count": 2,
+    "outbox-count": 1,
+    "uplink-count": 7
+}
+```
+Peers: `[{"ship": "~zod", "dev-addr": "260B1234", "status": "online"}]`
+Outbox: `[]` (all messages transmitted)
 
-### Rust bridge (`src/main.rs`)
-- Outbound task now prepends sender's DevAddr (4 bytes) to LoRaWAN FRMPayload
-- Inbound airlock task now pokes BOTH `uplink` (device tracking) AND `message-received` (P2P inbox)
-- Receiving side extracts first 4 bytes of payload as `src-addr`
+## Bugs Found & Fixed During Testing
 
-### Rust types (`src/urbit/types.rs`)
-- Added `src_addr` field to `OutboundMessage` struct
+### 1. Peer resolution on uplink (Hoon)
+**Problem:** The `%uplink` poke handler didn't check if the DevAddr belonged to a registered peer. Messages arrived as raw uplinks without being routed to the inbox.
 
-### Hoon agent (`urbit/lora/app/lora-agent.hoon`)
-- Outbox scry now includes `src-addr` from ship's `my-addr` identity
+**Fix:** Enhanced the `%uplink` handler to look up the sender's DevAddr in the peer map. If found, the uplink is automatically routed to the inbox as an `inbound-msg` with the sender's `@p` identity resolved.
 
-## Known Issues
-- Frames received without the 4-byte src-addr prefix (e.g., from non-P2P sources) will be mis-parsed. Future work: add a protocol version byte or magic prefix to distinguish P2P frames from raw LoRaWAN uplinks.
+### 2. Source DevAddr in outbox scry (Hoon)
+**Problem:** The `/outbox` scry only included `dest-addr` (recipient). The bridge had no way to know the *sender's* DevAddr to put in the LoRaWAN frame header.
+
+**Fix:** Added `src-addr` field to the outbox scry output, populated from `my-addr` state.
+
+### 3. LoRaWAN frame uses sender's DevAddr (Rust)
+**Problem:** The bridge was putting the *destination* DevAddr in the LoRaWAN frame header. The receiving bridge then couldn't identify who sent the message.
+
+**Fix:** Changed `run_outbound_task()` to use `src_addr` (sender's own DevAddr) in the frame header, falling back to `dest_addr` if not set.
+
+### 4. Flexible queued_at parsing (Rust)
+**Problem:** `OutboundMessage.queued_at` expected a string, but Urbit's `sect:enjs:format` outputs a number (unix timestamp).
+
+**Fix:** Changed type to `serde_json::Value` to accept both.
+
+## Conclusion
+
+**Phase 3 is complete.** Two Urbit ships can exchange bidirectional messages over simulated LoRa gateways with identity resolution. The full stack works:
+
+1. Ship queues message via `%send-message` poke
+2. Bridge polls outbox via scry, builds LoRaWAN frame
+3. Bridge sends PULL_RESP to gateway
+4. Gateway pair relays packet to the other side
+5. Receiving bridge decodes uplink, pokes ship
+6. Ship's agent resolves sender identity from DevAddr → peer map
+7. Message lands in inbox with sender `@p` attributed
+
+No Ames dependency for data transport. Identity-aware. Sovereign.
